@@ -40,15 +40,19 @@ public:
     publisher = this->create_publisher<geometry_msgs::msg::Twist>("/turtle2/cmd_vel", 10);
     
     timer = this->create_wall_timer(
-      std::chrono::milliseconds(1000), std::bind(&MyKFNode::timer_callback, this));
+      std::chrono::milliseconds(Time_Interval_Millisec), std::bind(&MyKFNode::timer_callback, this));
   }
 
 private:
 
     void timer_callback()
     {
+        //RCLCPP_INFO(this->get_logger(), "Timer callback");
+        rclcpp::Time current_time = this->get_clock()->now();
+        
+
         if (!client->service_is_ready()) {
-            RCLCPP_INFO(this->get_logger(), "service not available");
+            //RCLCPP_INFO(this->get_logger(), "service not available");
             return;
         }
 
@@ -62,21 +66,91 @@ private:
           
           spawned = true;
         }
+
+         if ( (current_time.seconds() - last_time_twist) > 1.0 ) // because turtlesim moves for 1 second for each twist message
+        {
+            control[V] = 0.0; // no control input at now
+            control[W] = 0.0;            
+        }
+        
+        //RCLCPP_INFO(this->get_logger(), "Current time: %f", current_time.seconds());
+        //RCLCPP_INFO(this->get_logger(), "Last time twist: %f", last_time_twist);
+        //RCLCPP_INFO(this->get_logger(), "Last time timer: %f", last_time_timer);
+
+        if (last_time_twist < last_time_timer) {
+            delta_t_control = current_time.seconds() - last_time_timer; // not the first state prediction since the control input
+        }
+        else
+        {
+            delta_t_control = current_time.seconds() - last_time_twist; // the first state prediction since the control input
+            //RCLCPP_INFO(this->get_logger(), "Current time: %f", current_time.seconds());
+            //RCLCPP_INFO(this->get_logger(), "Last time twist: %f", last_time_twist);
+            //RCLCPP_INFO(this->get_logger(), "Delta t control: %f", delta_t_control);
+        }        
+        //RCLCPP_INFO(this->get_logger(), "Delta t control: %f", delta_t_control);
+
+        RCLCPP_INFO(this->get_logger(), "(Ground truth) last_pose: x=%f, y=%f, theta=%f", last_pose.x, last_pose.y, last_pose.theta);
+
+        RCLCPP_INFO(this->get_logger(), "Delta t control: %f", delta_t_control);
+        if ( fabs(control[V]) > 0.0 || fabs(control[W]) > 0.0) {
+        //if ( control[V] > 0.0 || control[W] > 0.0) {
+            kalman_filter_prediction(mean, covariance, control);
+            RCLCPP_INFO(this->get_logger(), "(Predict) State: x=%f, y=%f, theta=%f", state[X], state[Y], state[THETA]);    
+        }
+        
         
 
+        RCLCPP_INFO(this->get_logger(), "Covariance:");
+        for (int i = 0; i < 3; ++i) {
+            std::stringstream ss;
+            for (int j = 0; j < 3; ++j) {
+                ss << covariance[i][j] << " ";
+            }
+            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+        }
 
+        RCLCPP_INFO(this->get_logger(), "Delta Pose: x=%f, y=%f, theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
+        
+        bool update = false;
+
+        if ( fabs(delta_pose[DELTA_X]) > 0.1 || fabs(delta_pose[DELTA_Y]) > 0.1 || fabs(delta_pose[DELTA_THETA]) > 0.1 ) {        
+            //RCLCPP_INFO(this->get_logger(), "update() is to be called");
+            kalman_filter_update(mean, covariance, delta_pose);       
+             update = true;
+        }
+
+        state[0] = mean[0];
+        state[1] = mean[1];
+        state[2] = mean[2];
+
+        if (update == true) {
+            RCLCPP_INFO(this->get_logger(), "(Update) State: x=%f, y=%f, theta=%f", state[X], state[Y], state[THETA]);   
+        }
+        delta_pose[DELTA_X] = 0.0; // reset the delta x, y, theta
+        delta_pose[DELTA_Y] = 0.0;
+        delta_pose[DELTA_THETA] = 0.0;
+
+        last_time_timer = this->get_clock()->now().seconds();
     }
 
     void kalman_filter_prediction(const double old_mean[], const double (*old_cov)[3], const double control_input[]) {
-        RCLCPP_INFO(this->get_logger(), "Kalman Filter Prediction: v=%f, w=%f", control_input[V], control_input[W]);
-        RCLCPP_INFO(this->get_logger(), "delta_t_control: %f", delta_t_control);
+        //RCLCPP_INFO(this->get_logger(), "Kalman Filter Prediction: v=%f, w=%f", control_input[V], control_input[W]);
+        //RCLCPP_INFO(this->get_logger(), "delta_t_control: %f", delta_t_control);
+
+        RCLCPP_INFO(this->get_logger(), "Linear velocity: %f", control[V]);
+        RCLCPP_INFO(this->get_logger(), "Angular velocity: %f", control[W]);
 
         Eigen::Matrix<double, 3, 3> A;
-        A << 1, 0, -delta_t_control * control_input[V] * sin(state[THETA]),
+        
+        A = Eigen::Matrix<double, 3, 3>::Identity();
+
+        /*
+        A << 1, 0, (-1.0) * delta_t_control * control_input[V] * sin(state[THETA]),
              0, 1, delta_t_control * control_input[V] * cos(state[THETA]),
              0, 0, 1;
-
-        Eigen::Matrix<double, 3, 2> B;
+        */
+        Eigen::Matrix<double, 3, 2> B;       
+        
         B << delta_t_control * cos(state[THETA]), 0,
              delta_t_control * sin(state[THETA]), 0,
              0, delta_t_control;
@@ -101,15 +175,15 @@ private:
                old_cov[2][0], old_cov[2][1], old_cov[2][2];
 
         Eigen::Matrix<double, 3, 1> New_Mean = A * Mean + B * U;
-
+       
         if (New_Mean(2, 0) > M_PI) {
             New_Mean(2, 0) -= 2 * M_PI;
         } else if (New_Mean(2, 0) < -M_PI) {
             New_Mean(2, 0) += 2 * M_PI;
         }
 
-        RCLCPP_INFO(this->get_logger(), "Old Mean: x=%f, y=%f, theta=%f", old_mean[0], old_mean[1], old_mean[2]);
-        RCLCPP_INFO(this->get_logger(), "New Mean: x=%f, y=%f, theta=%f", New_Mean(0, 0), New_Mean(1, 0), New_Mean(2, 0));
+        //RCLCPP_INFO(this->get_logger(), "Old Mean: x=%f, y=%f, theta=%f", old_mean[0], old_mean[1], old_mean[2]);
+        //RCLCPP_INFO(this->get_logger(), "New Mean: x=%f, y=%f, theta=%f", New_Mean(0, 0), New_Mean(1, 0), New_Mean(2, 0));
 
         Eigen::Matrix<double, 3, 3> New_Cov = A * Cov * A.transpose() + StateTransitionNoise;
     
@@ -125,22 +199,21 @@ private:
         covariance[1][2] = New_Cov(1, 2);
         covariance[2][0] = New_Cov(2, 0);
         covariance[2][1] = New_Cov(2, 1);
-        covariance[2][2] = New_Cov(2, 2);
-
-        state[0] = mean[0];
-        state[1] = mean[1];
-        state[2] = mean[2];       
+        covariance[2][2] = New_Cov(2, 2);        
     }
 
     void kalman_filter_update(const double old_mean[], const double (*old_cov)[3], const double delta_pose[]) {
-        RCLCPP_INFO(this->get_logger(), "Kalman Filter Update: delta_x=%f, delta_y=%f, delta_theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
-        RCLCPP_INFO(this->get_logger(), "Covariance Matrix:");
+        
+        RCLCPP_INFO(this->get_logger(), "\n");
+        RCLCPP_INFO(this->get_logger(), "Kalman Filter Update");
+        //RCLCPP_INFO(this->get_logger(), "Kalman Filter Update: delta_x=%f, delta_y=%f, delta_theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
+        //RCLCPP_INFO(this->get_logger(), "Covariance Matrix:");
         for (int i = 0; i < 3; ++i) {
             std::stringstream ss;
             for (int j = 0; j < 3; ++j) {
                 ss << old_cov[i][j] << " ";
             }
-            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+            //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
         Eigen::Matrix<double, 3, 3> C;
         C << 1, 0, 0,
@@ -158,25 +231,35 @@ private:
                old_cov[2][0], old_cov[2][1], old_cov[2][2];
 
 
+        RCLCPP_INFO(this->get_logger(), "Covariance Matrix:");
+        for (int i = 0; i < 3; ++i) {
+            std::stringstream ss;
+            for (int j = 0; j < 3; ++j) {
+                ss << Cov(i, j) << " ";
+            }
+            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+        }
+
         Eigen::Matrix<double, 3, 3> MeasurementNoise; // covariance for the measurement noise
         MeasurementNoise << 0.1, 0, 0,
                             0, 0.1, 0,
                             0, 0, 0.1;       
 
         Eigen::Matrix<double, 3, 1> Z; // measurement
-        Z << delta_pose[DELTA_X],
-             delta_pose[DELTA_Y],
-             delta_pose[DELTA_THETA];
+        Z << last_pose.x,
+                last_pose.y,
+                last_pose.theta;
+             
 
         Eigen::Matrix<double, 3, 3> Covariance = C * Cov * C.transpose() + MeasurementNoise;
 
-        RCLCPP_INFO(this->get_logger(), "Covariance:");
+        //RCLCPP_INFO(this->get_logger(), "Covariance:");
         for (int i = 0; i < 3; ++i) {
             std::stringstream ss;
             for (int j = 0; j < 3; ++j) {
                 ss << Covariance(i, j) << " ";
             }
-            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+            //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
         Eigen::Matrix<double, 3, 3> KalmanGain = Cov * C.transpose() * Covariance.inverse();
 
@@ -188,7 +271,12 @@ private:
             }
             RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
-        Eigen::Matrix<double, 3, 1> gain = KalmanGain * (Z - C * Mean);
+
+        RCLCPP_INFO(this->get_logger(), "Measurement: x=%f, y=%f, theta=%f", Z(0, 0), Z(1, 0), Z(2, 0));
+        Eigen::Matrix<double, 3, 1> expected_measurement = C * Mean;
+        RCLCPP_INFO(this->get_logger(), "Expected Measurement: x=%f, y=%f, theta=%f", expected_measurement(0, 0), expected_measurement(1, 0), expected_measurement(2, 0));
+
+        Eigen::Matrix<double, 3, 1> gain = KalmanGain * (Z - expected_measurement);
 
         printf("Gain: %f %f %f\n", gain(0, 0), gain(1, 0), gain(2, 0));
 
@@ -216,20 +304,31 @@ private:
         covariance[2][0] = New_Cov(2, 0);
         covariance[2][1] = New_Cov(2, 1);
         covariance[2][2] = New_Cov(2, 2);
+
+        RCLCPP_INFO(this->get_logger(), "Updated Covariance:");
+        for (int i = 0; i < 3; ++i) {
+            std::stringstream ss;
+            for (int j = 0; j < 3; ++j) {
+                ss << New_Cov(i, j) << " ";
+            }
+            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+        }
        
     }
 
+
+
     void handle_twist(const std::shared_ptr<geometry_msgs::msg::Twist> msg)
     {
-      RCLCPP_INFO(this->get_logger(), "Received twist message");
+      //RCLCPP_INFO(this->get_logger(), "Received twist message");
       rclcpp::Time current_time = this->get_clock()->now();
       
       control[V] = msg->linear.x;
       control[W] = msg->angular.z;
       // print the linear velocity in the twist msg
-      RCLCPP_INFO(this->get_logger(), "linear velocity: x=%f, y=%f, z=%f", msg->linear.x, msg->linear.y, msg->linear.z);
+      //RCLCPP_INFO(this->get_logger(), "linear velocity: x=%f, y=%f, z=%f", msg->linear.x, msg->linear.y, msg->linear.z);
       // print the angular velocity in the twist msg
-      RCLCPP_INFO(this->get_logger(), "angular velocity: x=%f, y=%f, z=%f", msg->angular.x, msg->angular.y, msg->angular.z);
+      //RCLCPP_INFO(this->get_logger(), "angular velocity: x=%f, y=%f, z=%f", msg->angular.x, msg->angular.y, msg->angular.z);
     
       last_time_twist = current_time.seconds();
       last_twist = *msg;
@@ -238,7 +337,7 @@ private:
 
     void handle_pose_turtle2(const std::shared_ptr<turtlesim::msg::Pose> msg)
     {
-      RCLCPP_INFO(this->get_logger(), "Received pose message turtle2");
+      //RCLCPP_INFO(this->get_logger(), "Received pose message turtle2");
       state_turtle2[X] = msg->x;
       state_turtle2[Y] = msg->y;
       state_turtle2[THETA] = msg->theta;
@@ -248,10 +347,10 @@ private:
             
             double translation_x = state[X] - state_turtle2[X];
             double translation_y = state[Y] - state_turtle2[Y];
-            RCLCPP_INFO(this->get_logger(), "Translation: x=%f, y=%f", translation_x, translation_y);
+            //RCLCPP_INFO(this->get_logger(), "Translation: x=%f, y=%f", translation_x, translation_y);
             
             double distance = sqrt(pow(translation_x, 2) + pow(translation_y, 2));
-            RCLCPP_INFO(this->get_logger(), "Distance: %f", distance);
+            //RCLCPP_INFO(this->get_logger(), "Distance: %f", distance);
             if (distance < 0.1) {
                 msg.linear.x = 0.0;
                 double angle = state[THETA];
@@ -283,66 +382,41 @@ private:
 
     void handle_pose(const std::shared_ptr<turtlesim::msg::Pose> msg)
     {
-        RCLCPP_INFO(this->get_logger(), "Received pose message");
+        //RCLCPP_INFO(this->get_logger(), "Received pose message");
         rclcpp::Time current_time = this->get_clock()->now();
-        RCLCPP_INFO(this->get_logger(), "Current time: %f", current_time.seconds());
-        RCLCPP_INFO(this->get_logger(), "last_time_pose: %f, last_time_twist: %f", last_time_pose, last_time_twist);
+        //RCLCPP_INFO(this->get_logger(), "Current time: %f", current_time.seconds());
+        //RCLCPP_INFO(this->get_logger(), "last_time_pose: %f, last_time_twist: %f", last_time_pose, last_time_twist);
         // print the position in the pose msg
-        RCLCPP_INFO(this->get_logger(), "position: x=%f, y=%f", msg->x, msg->y);
+        //RCLCPP_INFO(this->get_logger(), "position: x=%f, y=%f", msg->x, msg->y);
         // print the orientation in the pose msg
-        RCLCPP_INFO(this->get_logger(), "orientation: theta=%f", msg->theta);
+        //RCLCPP_INFO(this->get_logger(), "orientation: theta=%f", msg->theta);
         // prepare transform message
         
-        if (last_time_pose != 0.0)
-        {
-            delta_t_pose = current_time.seconds() - last_time_pose;
 
-            delta_pose[DELTA_X] = msg->x - last_pose.x;
-            delta_pose[DELTA_Y] = msg->y - last_pose.y;
-            delta_pose[DELTA_THETA] = msg->theta - last_pose.theta;
+        delta_t_pose = current_time.seconds() - last_time_timer;
 
-            if (delta_pose[DELTA_THETA] > M_PI) {
+        delta_pose[DELTA_X] += (msg->x - last_pose.x); // accumulate the delta x, y, theta untilel the next timer callback
+        delta_pose[DELTA_Y] += (msg->y - last_pose.y);
+        delta_pose[DELTA_THETA] += (msg->theta - last_pose.theta);
+
+        if (delta_pose[DELTA_THETA] > M_PI) {
                 delta_pose[DELTA_THETA] -= 2 * M_PI;
             } else if (delta_pose[DELTA_THETA] < -M_PI) {
                 delta_pose[DELTA_THETA] += 2 * M_PI;
             }
-        }
-
-        if ( (current_time.seconds() - last_time_twist) > 1.0 ) // because turtlesim moves for 1 second for each twist message
-        {
-            control[V] = 0.0; // no control input at now
-            control[W] = 0.0;            
-        }
-        
-        if (last_time_twist < last_time_pose) {
-            delta_t_control = current_time.seconds() - last_time_pose; // not the first state prediction since the control input
-        }
-        else
-        {
-            delta_t_control = current_time.seconds() - last_time_twist; // the first state prediction since the control input
-        }
-
-        kalman_filter_prediction(mean, covariance, control);
-        
-        if (delta_pose[DELTA_X] != 0.0 || delta_pose[DELTA_Y] != 0.0 || delta_pose[DELTA_THETA] != 0.0) {
-            RCLCPP_INFO(this->get_logger(), "Delta Pose: delta_x=%f, delta_y=%f, delta_theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
-            kalman_filter_update(mean, covariance, delta_pose);
-        }
-
-        state[0] = mean[0];
-        state[1] = mean[1];
-        state[2] = mean[2];
-        RCLCPP_INFO(this->get_logger(), "State: x=%f, y=%f, theta=%f", state[X], state[Y], state[THETA]);    
+            
         last_time_pose = current_time.seconds();
         last_pose = *msg;
     }
         
-        
+    const int Time_Interval_Millisec = 100; // test for 10, 100, and 1000 ms
     double delta_t_pose = 0.1; // the elapsed time since the last pose message
     double delta_t_control = 0.1; // the delta t for state prediction (the elapsed time since the last control message or the last pose message)
     double last_time_pose = 0.0; // the time of the last pose message
     double last_time_twist = 0.0; // the time of the last twist message
+    double last_time_timer = 0.0; // the time of the last timer callback
     turtlesim::msg::Pose last_pose;
+
     geometry_msgs::msg::Twist last_twist; 
     double delta_pose[3] = {0.0, 0.0, 0.0}; // delta_x, delta_y, delta_theta
     enum DeltaPoseIndex {DELTA_X, DELTA_Y, DELTA_THETA};
@@ -357,9 +431,9 @@ private:
     const double theta0 = 0.0;
 
     double mean[3] = {0.0, 0.0, 0.0};
-    double covariance[3][3] = {{0.05, 0.0, 0.0},
-                                {0.0, 0.05, 0.0},
-                                {0.0, 0.0, 0.05}};
+    double covariance[3][3] = {{0.1, 0.0, 0.0},
+                                {0.0, 0.1, 0.0},
+                                {0.0, 0.0, 0.1}};
 
     double state_turtle2[3] = {0.0, 0.0, 0.0};
 
@@ -371,7 +445,7 @@ private:
     rclcpp::Client<turtlesim::srv::Spawn>::SharedPtr client{nullptr};
 
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr publisher;
-    bool spawned = false;
+    bool spawned = false;    
 };
 
 int main(int argc, char ** argv)
