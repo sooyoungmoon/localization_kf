@@ -31,10 +31,16 @@ public:
     mean[0] = x0;
     mean[1] = y0;
     mean[2] = theta0;
+    mean[3] = vx0;
+    mean[4] = vy0;
+    mean[5] = vtheta0;
 
     state[0] = mean[0];
     state[1] = mean[1];
     state[2] = mean[2];
+    state[3] = mean[3];
+    state[4] = mean[4];
+    state[5] = mean[5];
 
     client = this->create_client<turtlesim::srv::Spawn>("spawn");
     publisher = this->create_publisher<geometry_msgs::msg::Twist>("/turtle2/cmd_vel", 10);
@@ -95,33 +101,34 @@ private:
         if ( fabs(control[V]) > 0.0 || fabs(control[W]) > 0.0) {
         //if ( control[V] > 0.0 || control[W] > 0.0) {
             kalman_filter_prediction(mean, covariance, control);
-            RCLCPP_INFO(this->get_logger(), "(Predict) State: x=%f, y=%f, theta=%f", state[X], state[Y], state[THETA]);    
-        }
-        
-        
+            RCLCPP_INFO(this->get_logger(), "(Prediction) State: x=%f, y=%f, theta=%f, vx = %f, vy = %f, vtheta = %f", state[X], state[Y], state[THETA], state[VX], state[VY], state[VTHETA]);  
+        }        
 
         RCLCPP_INFO(this->get_logger(), "Covariance:");
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 6; ++i) {
             std::stringstream ss;
-            for (int j = 0; j < 3; ++j) {
+            for (int j = 0; j < 6; ++j) {
                 ss << covariance[i][j] << " ";
             }
             RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
 
-        RCLCPP_INFO(this->get_logger(), "Delta Pose: x=%f, y=%f, theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
+        //RCLCPP_INFO(this->get_logger(), "Delta Pose: x=%f, y=%f, theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
         
         bool update = false;
 
         if ( fabs(delta_pose[DELTA_X]) > 0.1 || fabs(delta_pose[DELTA_Y]) > 0.1 || fabs(delta_pose[DELTA_THETA]) > 0.1 ) {        
             //RCLCPP_INFO(this->get_logger(), "update() is to be called");
             kalman_filter_update(mean, covariance, delta_pose);       
-             update = true;
+            update = true;
         }
 
         state[0] = mean[0];
         state[1] = mean[1];
         state[2] = mean[2];
+        state[3] = mean[3];
+        state[4] = mean[4];
+        state[5] = mean[5];
 
         if (update == true) {
             RCLCPP_INFO(this->get_logger(), "(Update) State: x=%f, y=%f, theta=%f", state[X], state[Y], state[THETA]);   
@@ -133,63 +140,100 @@ private:
         last_time_timer = this->get_clock()->now().seconds();
     }
 
-    void kalman_filter_prediction(const double old_mean[], const double (*old_cov)[3], const double control_input[]) {
+    void kalman_filter_prediction(const double old_mean[], const double (*old_cov)[6], const double control_input[]) {
+        RCLCPP_INFO(this->get_logger(), "Kalman Filter Prediction");
         //RCLCPP_INFO(this->get_logger(), "Kalman Filter Prediction: v=%f, w=%f", control_input[V], control_input[W]);
         //RCLCPP_INFO(this->get_logger(), "delta_t_control: %f", delta_t_control);
 
         RCLCPP_INFO(this->get_logger(), "Linear velocity: %f", control[V]);
         RCLCPP_INFO(this->get_logger(), "Angular velocity: %f", control[W]);
 
-        Eigen::Matrix<double, 3, 3> A;
-        
-        A = Eigen::Matrix<double, 3, 3>::Identity();
+        Eigen::Matrix<double, 6, 6> A;
 
+        A << 1, 0, 0, 0, 0, 0,
+            0, 1, 0, 0, 0, 0,
+            0, 0, 1, 0, 0, 0,
+            0, 0, 0, 1, 0, 0,
+            0, 0, 0, 0, 1, 0,
+            0, 0, 0, 0, 0, 1;
         /*
-        A << 1, 0, (-1.0) * delta_t_control * control_input[V] * sin(state[THETA]),
-             0, 1, delta_t_control * control_input[V] * cos(state[THETA]),
-             0, 0, 1;
+        A << 1, 0, 0, delta_t_control, 0, 0,
+            0, 1, 0, 0, delta_t_control, 0,
+            0, 0, 1, 0, 0, delta_t_control,
+            0, 0, 0, 1, 0, 0,
+            0, 0, 0, 0, 1, 0,
+            0, 0, 0, 0, 0, 1;
         */
-        Eigen::Matrix<double, 3, 2> B;       
         
+        Eigen::Matrix<double, 6, 2> B;     
+
         B << delta_t_control * cos(state[THETA]), 0,
              delta_t_control * sin(state[THETA]), 0,
-             0, delta_t_control;
+            0, delta_t_control,
+            cos(state[THETA]), 0,
+            sin(state[THETA]), 0,
+            0, 1;
 
-        Eigen::Matrix<double, 3, 3> StateTransitionNoise;
-        StateTransitionNoise << 0.1, 0, 0,
-                             0, 0.1, 0,
-                             0, 0, 0.1;
+        /*
+        B << 0.5 * delta_t_control * delta_t_control * cos(state[THETA]), 0,
+            0.5 * delta_t_control * delta_t_control * sin(state[THETA]), 0,
+            0, delta_t_control,
+            cos(state[THETA]), 0,
+            sin(state[THETA]), 0,
+            0, 1;
+        */
+        Eigen::Matrix<double, 6, 6> StateTransitionNoise;
+        StateTransitionNoise << 0.1, 0, 0, 0, 0, 0,
+                             0, 0.1, 0, 0, 0, 0,
+                             0, 0, 0.1, 0, 0, 0,
+                                0, 0, 0, 0.1, 0, 0,
+                                0, 0, 0, 0, 0.1, 0,
+                                0, 0, 0, 0, 0, 0.1;
              
-        Eigen::Matrix<double, 3, 1> Mean;
+        Eigen::Matrix<double, 6, 1> Mean;
         Mean << old_mean[0],
              old_mean[1],
-             old_mean[2];
+             old_mean[2],
+             old_mean[3],
+             old_mean[4],
+             old_mean[5];
 
         Eigen::Matrix<double, 2, 1> U;
         U << control_input[V],
              control_input[W];
 
-        Eigen::Matrix<double, 3, 3> Cov;
-        Cov << old_cov[0][0], old_cov[0][1], old_cov[0][2],
-               old_cov[1][0], old_cov[1][1], old_cov[1][2],
-               old_cov[2][0], old_cov[2][1], old_cov[2][2];
+        Eigen::Matrix<double, 6, 6> Cov;
+        Cov << old_cov[0][0], old_cov[0][1], old_cov[0][2], old_cov[0][3], old_cov[0][4], old_cov[0][5],
+               old_cov[1][0], old_cov[1][1], old_cov[1][2], old_cov[1][3], old_cov[1][4], old_cov[1][5],
+               old_cov[2][0], old_cov[2][1], old_cov[2][2], old_cov[2][3], old_cov[2][4], old_cov[2][5],
+                old_cov[3][0], old_cov[3][1], old_cov[3][2], old_cov[3][3], old_cov[3][4], old_cov[3][5],
+                old_cov[4][0], old_cov[4][1], old_cov[4][2], old_cov[4][3], old_cov[4][4], old_cov[4][5],
+                old_cov[5][0], old_cov[5][1], old_cov[5][2] , old_cov[5][3], old_cov[5][4], old_cov[5][5];
 
-        Eigen::Matrix<double, 3, 1> New_Mean = A * Mean + B * U;
+        Eigen::Matrix<double, 6, 1> New_Mean = A * Mean + B * U;
        
         if (New_Mean(2, 0) > M_PI) {
             New_Mean(2, 0) -= 2 * M_PI;
         } else if (New_Mean(2, 0) < -M_PI) {
             New_Mean(2, 0) += 2 * M_PI;
         }
+        if(New_Mean(5, 0) > M_PI) {
+            New_Mean(5, 0) -= 2 * M_PI;
+        } else if (New_Mean(5, 0) < -M_PI) {
+            New_Mean(5, 0) += 2 * M_PI;
+        }
 
-        //RCLCPP_INFO(this->get_logger(), "Old Mean: x=%f, y=%f, theta=%f", old_mean[0], old_mean[1], old_mean[2]);
-        //RCLCPP_INFO(this->get_logger(), "New Mean: x=%f, y=%f, theta=%f", New_Mean(0, 0), New_Mean(1, 0), New_Mean(2, 0));
-
-        Eigen::Matrix<double, 3, 3> New_Cov = A * Cov * A.transpose() + StateTransitionNoise;
+        RCLCPP_INFO(this->get_logger(), "Old Mean: x=%f, y=%f, theta=%f, vx=%f, vy=%f, vtheta=%f", old_mean[0], old_mean[1], old_mean[2], old_mean[3], old_mean[4], old_mean[5]);
+        RCLCPP_INFO(this->get_logger(), "New Mean: x=%f, y=%f, theta=%f, vx=%f, vy=%f, vtheta=%f", New_Mean(0, 0), New_Mean(1, 0), New_Mean(2, 0), New_Mean(3, 0), New_Mean(4, 0), New_Mean(5, 0));
+        
+        Eigen::Matrix<double, 6, 6> New_Cov = A * Cov * A.transpose() + StateTransitionNoise;
     
         mean[0] = New_Mean(0, 0);
         mean[1] = New_Mean(1, 0);
         mean[2] = New_Mean(2, 0);
+        mean[3] = New_Mean(3, 0);
+        mean[4] = New_Mean(4, 0);
+        mean[5] = New_Mean(5, 0);
 
         covariance[0][0] = New_Cov(0, 0);
         covariance[0][1] = New_Cov(0, 1);
@@ -202,54 +246,60 @@ private:
         covariance[2][2] = New_Cov(2, 2);        
     }
 
-    void kalman_filter_update(const double old_mean[], const double (*old_cov)[3], const double delta_pose[]) {
+    void kalman_filter_update(const double old_mean[], const double (*old_cov)[6], const double delta_pose[]) {
         
-        RCLCPP_INFO(this->get_logger(), "\n");
-        RCLCPP_INFO(this->get_logger(), "Kalman Filter Update");
+        //RCLCPP_INFO(this->get_logger(), "\n");
+        //RCLCPP_INFO(this->get_logger(), "Kalman Filter Update");
         //RCLCPP_INFO(this->get_logger(), "Kalman Filter Update: delta_x=%f, delta_y=%f, delta_theta=%f", delta_pose[DELTA_X], delta_pose[DELTA_Y], delta_pose[DELTA_THETA]);
         //RCLCPP_INFO(this->get_logger(), "Covariance Matrix:");
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 6; ++i) {
             std::stringstream ss;
-            for (int j = 0; j < 3; ++j) {
+            for (int j = 0; j < 6; ++j) {
                 ss << old_cov[i][j] << " ";
             }
             //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
-        Eigen::Matrix<double, 3, 3> C;
-        C << 1, 0, 0,
-             0, 1, 0,
-             0, 0, 1;
+        Eigen::Matrix<double, 3, 6> C;
+        C << 0, 0, 0, Time_Interval_Millisec, 0, 0,
+                       0, 0, 0, 0, Time_Interval_Millisec, 0,
+                       0, 0, 0, 0, 0, Time_Interval_Millisec;  
 
-        Eigen::Matrix<double, 3, 1> Mean;
+        Eigen::Matrix<double, 6, 1> Mean;
         Mean << old_mean[0],
              old_mean[1],
-             old_mean[2];     
+             old_mean[2],
+             old_mean[3],
+             old_mean[4],
+             old_mean[5]; 
 
-        Eigen::Matrix<double, 3, 3> Cov;
-        Cov << old_cov[0][0], old_cov[0][1], old_cov[0][2],
-               old_cov[1][0], old_cov[1][1], old_cov[1][2],
-               old_cov[2][0], old_cov[2][1], old_cov[2][2];
+        Eigen::Matrix<double, 6, 6> Cov;
+        Cov << old_cov[0][0], old_cov[0][1], old_cov[0][2], old_cov[0][3], old_cov[0][4], old_cov[0][5],
+               old_cov[1][0], old_cov[1][1], old_cov[1][2], old_cov[1][3], old_cov[1][4], old_cov[1][5],
+               old_cov[2][0], old_cov[2][1], old_cov[2][2], old_cov[2][3], old_cov[2][4], old_cov[2][5],
+                old_cov[3][0], old_cov[3][1], old_cov[3][2], old_cov[3][3], old_cov[3][4], old_cov[3][5],
+                old_cov[4][0], old_cov[4][1], old_cov[4][2], old_cov[4][3], old_cov[4][4], old_cov[4][5],
+                old_cov[5][0], old_cov[5][1], old_cov[5][2] , old_cov[5][3], old_cov[5][4], old_cov[5][5];
 
 
         RCLCPP_INFO(this->get_logger(), "Covariance Matrix:");
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 6; ++i) {
             std::stringstream ss;
-            for (int j = 0; j < 3; ++j) {
+            for (int j = 0; j < 6; ++j) {
                 ss << Cov(i, j) << " ";
             }
-            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+            //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
 
         Eigen::Matrix<double, 3, 3> MeasurementNoise; // covariance for the measurement noise
+        
         MeasurementNoise << 0.1, 0, 0,
                             0, 0.1, 0,
-                            0, 0, 0.1;       
+                            0, 0, 0.1;
 
         Eigen::Matrix<double, 3, 1> Z; // measurement
-        Z << last_pose.x,
-                last_pose.y,
-                last_pose.theta;
-             
+        Z << delta_pose[DELTA_X],
+                delta_pose[DELTA_Y],
+                delta_pose[DELTA_THETA];
 
         Eigen::Matrix<double, 3, 3> Covariance = C * Cov * C.transpose() + MeasurementNoise;
 
@@ -261,39 +311,47 @@ private:
             }
             //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
-        Eigen::Matrix<double, 3, 3> KalmanGain = Cov * C.transpose() * Covariance.inverse();
+        Eigen::Matrix<double, 6, 3> KalmanGain = Cov * C.transpose() * Covariance.inverse();
 
         RCLCPP_INFO(this->get_logger(), "Kalman Gain:");
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 6; ++i) {
             std::stringstream ss;
             for (int j = 0; j < 3; ++j) {
             ss << KalmanGain(i, j) << " ";
             }
-            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+            //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
 
         RCLCPP_INFO(this->get_logger(), "Measurement: x=%f, y=%f, theta=%f", Z(0, 0), Z(1, 0), Z(2, 0));
         Eigen::Matrix<double, 3, 1> expected_measurement = C * Mean;
         RCLCPP_INFO(this->get_logger(), "Expected Measurement: x=%f, y=%f, theta=%f", expected_measurement(0, 0), expected_measurement(1, 0), expected_measurement(2, 0));
 
-        Eigen::Matrix<double, 3, 1> gain = KalmanGain * (Z - expected_measurement);
+        Eigen::Matrix<double, 6, 1> gain = KalmanGain * (Z - expected_measurement);
 
-        printf("Gain: %f %f %f\n", gain(0, 0), gain(1, 0), gain(2, 0));
+        //printf("Gain: %f %f %f %f %f %f\n", gain(0, 0), gain(1, 0), gain(2, 0), gain(3, 0), gain(4, 0), gain(5, 0));
 
-        Eigen::Matrix<double, 3, 1> New_Mean = Mean + gain;
+        Eigen::Matrix<double, 6, 1> New_Mean = Mean + gain;
         if (New_Mean(2, 0) > M_PI) {
             New_Mean(2, 0) -= 2 * M_PI;
         } else if (New_Mean(2, 0) < -M_PI) {
             New_Mean(2, 0) += 2 * M_PI;
         }
+        if(New_Mean(5, 0) > M_PI) {
+            New_Mean(5, 0) -= 2 * M_PI;
+        } else if (New_Mean(5, 0) < -M_PI) {
+            New_Mean(5, 0) += 2 * M_PI;
+        }
 
-        RCLCPP_INFO(this->get_logger(), "Updated Mean: x=%f, y=%f, theta=%f", New_Mean(0, 0), New_Mean(1, 0), New_Mean(2, 0));
+        //RCLCPP_INFO(this->get_logger(), "Updated Mean: x=%f, y=%f, theta=%f, vx = %f, vy = %f, vtheta = %f ", New_Mean(0, 0), New_Mean(1, 0), New_Mean(2, 0), New_Mean(3, 0), New_Mean(4, 0), New_Mean(5, 0));
 
-        Eigen::Matrix<double, 3, 3> New_Cov = (Eigen::Matrix<double, 3, 3>::Identity() - KalmanGain * C) * Cov;
+        Eigen::Matrix<double, 6, 6> New_Cov = (Eigen::Matrix<double, 6, 6>::Identity() - KalmanGain * C) * Cov;
 
         mean[0] = New_Mean(0, 0);
         mean[1] = New_Mean(1, 0);
         mean[2] = New_Mean(2, 0);
+        mean[3] = New_Mean(3, 0);
+        mean[4] = New_Mean(4, 0);
+        mean[5] = New_Mean(5, 0);
 
         covariance[0][0] = New_Cov(0, 0);
         covariance[0][1] = New_Cov(0, 1);
@@ -306,12 +364,12 @@ private:
         covariance[2][2] = New_Cov(2, 2);
 
         RCLCPP_INFO(this->get_logger(), "Updated Covariance:");
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 6; ++i) {
             std::stringstream ss;
-            for (int j = 0; j < 3; ++j) {
+            for (int j = 0; j < 6; ++j) {
                 ss << New_Cov(i, j) << " ";
             }
-            RCLCPP_INFO(this->get_logger(), ss.str().c_str());
+            //RCLCPP_INFO(this->get_logger(), ss.str().c_str());
         }
        
     }
@@ -408,7 +466,7 @@ private:
         last_time_pose = current_time.seconds();
         last_pose = *msg;
     }
-        
+    
     const int Time_Interval_Millisec = 100; // test for 10, 100, and 1000 ms
     double delta_t_pose = 0.1; // the elapsed time since the last pose message
     double delta_t_control = 0.1; // the delta t for state prediction (the elapsed time since the last control message or the last pose message)
@@ -419,21 +477,31 @@ private:
 
     geometry_msgs::msg::Twist last_twist; 
     double delta_pose[3] = {0.0, 0.0, 0.0}; // delta_x, delta_y, delta_theta
+    
     enum DeltaPoseIndex {DELTA_X, DELTA_Y, DELTA_THETA};
 
-    double state[3] = {0.0, 0.0, 0.0}; // x, y, theta
-    enum StateOdomIndex {X, Y, THETA};
+    double state[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // x, y, theta, vx, vy, vtheta
+    //double state[3] = {0.0, 0.0, 0.0}; // x, y, theta
+    enum StateOdomIndex {X, Y, THETA, VX, VY, VTHETA};
     double control[2] = {0.0, 0.0}; // v, w
     enum ControlIndex {V, W};      
 
     const double x0 = 5.5;
     const double y0 = 5.5;
     const double theta0 = 0.0;
+    const double vx0 = 0.0;
+    const double vy0 = 0.0;
+    const double vtheta0 = 0.0;
 
-    double mean[3] = {0.0, 0.0, 0.0};
-    double covariance[3][3] = {{0.1, 0.0, 0.0},
-                                {0.0, 0.1, 0.0},
-                                {0.0, 0.0, 0.1}};
+    double mean[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    double covariance[6][6] =     {
+        {0.1, 0.0, 0.0, 0.0, 0.0, 0.0},
+        {0.0, 0.1, 0.0, 0.0, 0.0, 0.0},
+        {0.0, 0.0, 0.1, 0.0, 0.0, 0.0},
+        {0.0, 0.0, 0.0, 0.1, 0.0, 0.0},
+        {0.0, 0.0, 0.0, 0.0, 0.1, 0.0},
+        {0.0, 0.0, 0.0, 0.0, 0.0, 0.1}
+    };
 
     double state_turtle2[3] = {0.0, 0.0, 0.0};
 
